@@ -1,4 +1,3 @@
-
 name: Extract NovaVault Project
 
 on:
@@ -10,6 +9,7 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
+
     steps:
       - name: Get repository
         uses: actions/checkout@v4
@@ -18,24 +18,30 @@ jobs:
         run: |
           python - <<'PY'
           import zipfile, os, shutil
+
           archive = "novavault-platform-source.zip"
+
           with zipfile.ZipFile(archive) as z:
               files = [n for n in z.namelist() if n.strip()]
               roots = {n.split('/')[0] for n in files}
               strip = next(iter(roots)) if len(roots) == 1 else None
+
               for n in files:
                   parts = n.split('/')
                   if strip and parts[0] == strip:
                       parts = parts[1:]
                   if not parts:
                       continue
+
                   dest = os.path.join(*parts)
+
                   if n.endswith('/'):
                       os.makedirs(dest, exist_ok=True)
                   else:
                       os.makedirs(os.path.dirname(dest) or '.', exist_ok=True)
                       with z.open(n) as src, open(dest, 'wb') as dst:
                           shutil.copyfileobj(src, dst)
+
           os.remove(archive)
           PY
 
