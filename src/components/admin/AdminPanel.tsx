@@ -799,8 +799,8 @@ export function AdminPanel({ adminToken, adminEmail, onLogout, onBackToApp, onTo
                   <strong>Register Webhook Automatically</strong> after deploying.
                 </li>
                 <li>
-                  <strong>Zero-Budget Architecture:</strong> Uses embedded SQLite (<code>data/novavault.db</code>,
-                  configurable via <code>DATA_DIR</code>) + official Telegram Bot API.
+                  <strong>Production PostgreSQL Architecture:</strong> Uses PostgreSQL (<code>pg</code> via{' '}
+                  <code>DATABASE_URL</code> with automatic Render SSL handling) + official Telegram Bot API.
                 </li>
               </ol>
             </section>

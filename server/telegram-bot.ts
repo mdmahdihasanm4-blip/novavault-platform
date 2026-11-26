@@ -1,4 +1,4 @@
-import { db, generateReferralCode, getSettingsMap } from './db.ts';
+import { execute, generateReferralCode, getSettingsMap, queryOne } from './db.ts';
 import { sanitizeExternalUrl } from './security.ts';
 
 interface TelegramUpdate {
@@ -95,8 +95,8 @@ export function isDisallowedAuthProxyUrl(rawUrl: string): boolean {
   }
 }
 
-export function getTelegramWebAppUrl(overrideUrl?: string): string {
-  const settings = getSettingsMap();
+export async function getTelegramWebAppUrl(overrideUrl?: string): Promise<string> {
+  const settings = await getSettingsMap();
   const candidates = [
     overrideUrl,
     settings.publicAppUrl,
@@ -232,7 +232,7 @@ export async function configureTelegramBotMenuAndCommands(overrideUrl?: string):
     };
   }
 
-  const settings = getSettingsMap();
+  const settings = await getSettingsMap();
   const appName = (settings.appName || 'NovaVault').trim() || 'NovaVault';
 
   if (overrideUrl) {
@@ -250,7 +250,7 @@ export async function configureTelegramBotMenuAndCommands(overrideUrl?: string):
     }
   }
 
-  const webAppUrl = getTelegramWebAppUrl(overrideUrl);
+  const webAppUrl = await getTelegramWebAppUrl(overrideUrl);
 
   let botUsername = runtimeState.connectedBotUsername;
   let commandsConfigured = false;
@@ -283,7 +283,11 @@ export async function configureTelegramBotMenuAndCommands(overrideUrl?: string):
       runtimeState.connectedBotUsername = botUsername;
       const currentBotSetting = (settings.botUsername || '').trim();
       if (!currentBotSetting || currentBotSetting === 'NovaVaultRewardBot') {
-        db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('botUsername', ?)").run(botUsername);
+        await execute(
+          `INSERT INTO app_settings (key, value) VALUES ('botUsername', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [botUsername]
+        );
       }
     }
 
@@ -333,7 +337,11 @@ export async function configureTelegramBotMenuAndCommands(overrideUrl?: string):
         runtimeState.menuConfigured = menuConfigured;
         if (menuConfigured) {
           runtimeState.menuButtonUrl = webAppUrl;
-          db.prepare("INSERT OR REPLACE INTO app_settings (key, value) VALUES ('publicAppUrl', ?)").run(webAppUrl);
+          await execute(
+            `INSERT INTO app_settings (key, value) VALUES ('publicAppUrl', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+            [webAppUrl]
+          );
         } else if (menuJson.description) {
           lastError = menuJson.description;
         }
@@ -395,63 +403,81 @@ export async function processTelegramUpdate(update: TelegramUpdate): Promise<voi
   const chatId = msg.chat.id;
   const rawText = msg.text.trim();
   const command = rawText.split(/\s+/)[0].split('@')[0].toLowerCase();
-  const settings = getSettingsMap();
+  const settings = await getSettingsMap();
   const appName = settings.appName || 'NovaVault';
   const safeAppName = escapeHtml(appName);
-  const appUrl = getTelegramWebAppUrl();
+  const appUrl = await getTelegramWebAppUrl();
 
   // Ensure user exists or sync profile
   const now = new Date().toISOString();
-  let user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(tgId) as
-    | { id: number; points_balance: number; referral_code: string; total_earned: number }
-    | undefined;
+  let user = await queryOne<{
+    id: number;
+    points_balance: number;
+    referral_code: string;
+    total_earned: number;
+  }>('SELECT id, points_balance, referral_code, total_earned FROM users WHERE telegram_id = $1', [tgId]);
 
   const tgUsername = msg.from.username || `user_${tgId.slice(-6)}`;
 
   if (!user) {
-    const refCode = generateReferralCode(tgUsername);
-    let referredById: number | null = null;
+    let refCode = generateReferralCode(tgUsername);
+    for (let i = 0; i < 5; i++) {
+      const clash = await queryOne<{ id: number }>('SELECT id FROM users WHERE referral_code = $1', [refCode]);
+      if (!clash) break;
+      refCode = generateReferralCode(`${tgUsername}${i}`);
+    }
 
+    let referredById: number | null = null;
     if (command === '/start') {
       const parts = rawText.split(/\s+/);
       const param = (parts[1] || '').trim();
       const code = param.startsWith('ref_') ? param.slice(4) : param;
       if (code) {
-        const referrer = db
-          .prepare('SELECT id, telegram_id FROM users WHERE referral_code = ?')
-          .get(code) as { id: number; telegram_id: string } | undefined;
+        const referrer = await queryOne<{ id: number; telegram_id: string }>(
+          'SELECT id, telegram_id FROM users WHERE referral_code = $1',
+          [code]
+        );
         if (referrer && referrer.telegram_id !== tgId) {
           referredById = referrer.id;
         }
       }
     }
 
-    db.prepare(`
-      INSERT INTO users (telegram_id, username, first_name, last_name, is_online, last_seen_at, referral_code, referred_by_user_id, language, created_at)
-      VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
-    `).run(
-      tgId,
-      tgUsername,
-      msg.from.first_name || '',
-      msg.from.last_name || '',
-      now,
-      refCode,
-      referredById,
-      msg.from.language_code === 'bn' ? 'bn' : settings.defaultLanguage || 'en',
-      now
-    );
-
-    user = db.prepare('SELECT * FROM users WHERE telegram_id = ?').get(tgId) as {
+    user = await queryOne<{
       id: number;
       points_balance: number;
       referral_code: string;
       total_earned: number;
-    };
+    }>(
+      `INSERT INTO users (telegram_id, username, first_name, last_name, is_online, last_seen_at, referral_code, referred_by_user_id, language, created_at)
+       VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9)
+       ON CONFLICT (telegram_id) DO UPDATE SET
+         username = EXCLUDED.username,
+         first_name = EXCLUDED.first_name,
+         last_name = EXCLUDED.last_name,
+         is_online = 1,
+         last_seen_at = EXCLUDED.last_seen_at
+       RETURNING id, points_balance, referral_code, total_earned`,
+      [
+        tgId,
+        tgUsername,
+        msg.from.first_name || '',
+        msg.from.last_name || '',
+        now,
+        refCode,
+        referredById,
+        msg.from.language_code === 'bn' ? 'bn' : settings.defaultLanguage || 'en',
+        now,
+      ]
+    );
   } else {
-    db.prepare(
-      `UPDATE users SET username = ?, first_name = ?, last_name = ?, is_online = 1, last_seen_at = ? WHERE id = ?`
-    ).run(tgUsername, msg.from.first_name || '', msg.from.last_name || '', now, user.id);
+    await execute(
+      'UPDATE users SET username = $1, first_name = $2, last_name = $3, is_online = 1, last_seen_at = $4 WHERE id = $5',
+      [tgUsername, msg.from.first_name || '', msg.from.last_name || '', now, user.id]
+    );
   }
+
+  if (!user) return;
 
   const openButton = appUrl
     ? {
@@ -500,21 +526,19 @@ export async function processTelegramUpdate(update: TelegramUpdate): Promise<voi
       await sendTelegramMessage(botToken, chatId, 'Unauthorized: Admin Telegram ID required.');
       return;
     }
-    const stats = db
-      .prepare(
-        `SELECT
-          (SELECT COUNT(*) FROM users WHERE is_preview = 0) as totalUsers,
-          (SELECT COUNT(*) FROM withdrawals WHERE status = 'pending') as pendingWithdrawals,
-          (SELECT COUNT(*) FROM task_submissions WHERE status = 'pending') as pendingTasks`
-      )
-      .get() as { totalUsers: number; pendingWithdrawals: number; pendingTasks: number };
+
+    const [usersRes, wdRes, tasksRes] = await Promise.all([
+      queryOne<{ cnt: number }>('SELECT COUNT(*)::int AS cnt FROM users WHERE is_preview = 0'),
+      queryOne<{ cnt: number }>("SELECT COUNT(*)::int AS cnt FROM withdrawals WHERE status = 'pending'"),
+      queryOne<{ cnt: number }>("SELECT COUNT(*)::int AS cnt FROM task_submissions WHERE status = 'pending'"),
+    ]);
 
     const adminButton = appUrl
       ? {
           inline_keyboard: [
             [
               {
-                text: `Open Admin Panel`,
+                text: 'Open Admin Panel',
                 web_app: { url: `${appUrl}/#admin` },
               },
             ],
@@ -525,7 +549,7 @@ export async function processTelegramUpdate(update: TelegramUpdate): Promise<voi
     await sendTelegramMessage(
       botToken,
       chatId,
-      `<b>${safeAppName} Admin Summary</b>\nUsers: ${stats.totalUsers}\nPending Withdrawals: ${stats.pendingWithdrawals}\nPending Task Reviews: ${stats.pendingTasks}\n\nOpen the Admin Panel at ${appUrl ? `${escapeHtml(appUrl)}/#admin` : 'your public Admin URL once deployed'}.`,
+      `<b>${safeAppName} Admin Summary</b>\nUsers: ${usersRes?.cnt || 0}\nPending Withdrawals: ${wdRes?.cnt || 0}\nPending Task Reviews: ${tasksRes?.cnt || 0}\n\nOpen the Admin Panel at ${appUrl ? `${escapeHtml(appUrl)}/#admin` : 'your public Admin URL once deployed'}.`,
       adminButton
     );
     return;
@@ -534,13 +558,12 @@ export async function processTelegramUpdate(update: TelegramUpdate): Promise<voi
   if (command === '/refer' || command === '/referral') {
     const botUser = (settings.botUsername || runtimeState.connectedBotUsername || 'NovaVaultRewardBot').replace(/^@/, '');
     const inviteLink = `https://t.me/${botUser}?startapp=ref_${user.referral_code}`;
-    const refStats = db
-      .prepare(
-        `SELECT COUNT(*) as total,
-                COALESCE(SUM(CASE WHEN referral_qualified = 1 THEN 1 ELSE 0 END), 0) as qualified
-         FROM users WHERE referred_by_user_id = ?`
-      )
-      .get(user.id) as { total: number; qualified: number };
+    const refStats = await queryOne<{ total: number; qualified: number }>(
+      `SELECT COUNT(*)::int AS total,
+              COALESCE(SUM(CASE WHEN referral_qualified = 1 THEN 1 ELSE 0 END), 0)::int AS qualified
+       FROM users WHERE referred_by_user_id = $1`,
+      [user.id]
+    );
     const rewardPts = Number(settings.referralRewardPoints || '100');
     const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(inviteLink)}&text=${encodeURIComponent(
       `Join ${appName} and earn verified daily rewards!`
@@ -549,7 +572,7 @@ export async function processTelegramUpdate(update: TelegramUpdate): Promise<voi
     await sendTelegramMessage(
       botToken,
       chatId,
-      `<b>${safeAppName} Referral Program</b>\n\nInvite friends and earn <b>+${rewardPts} PTS</b> per qualified referral.\n\nYour Code: <code>${escapeHtml(user.referral_code)}</code>\nInvited Friends: <b>${refStats.total}</b> (Qualified: <b>${refStats.qualified}</b>)\n\nShare Link:\n<code>${escapeHtml(inviteLink)}</code>`,
+      `<b>${safeAppName} Referral Program</b>\n\nInvite friends and earn <b>+${rewardPts} PTS</b> per qualified referral.\n\nYour Code: <code>${escapeHtml(user.referral_code)}</code>\nInvited Friends: <b>${refStats?.total || 0}</b> (Qualified: <b>${refStats?.qualified || 0}</b>)\n\nShare Link:\n<code>${escapeHtml(inviteLink)}</code>`,
       {
         inline_keyboard: [
           [{ text: 'Share Invite Link', url: shareUrl }],

@@ -1,3 +1,9 @@
+databases:
+  - name: novavault-db
+    plan: free
+    databaseName: novavault
+    user: novavault
+
 services:
   - type: web
     name: novavault-telegram-miniapp
@@ -20,4 +26,6 @@ services:
       - key: TELEGRAM_BOT_POLLING
         value: "false"
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: novavault-db
+          property: connectionString
