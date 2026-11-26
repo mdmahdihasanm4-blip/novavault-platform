@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: novavault-telegram-miniapp
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PUBLIC_APP_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ADMIN_IDS
+        sync: false
+      - key: ADMIN_PASSCODE
+        sync: false
+      - key: TELEGRAM_BOT_POLLING
+        value: "false"
+      - key: DATABASE_URL
+        sync: false

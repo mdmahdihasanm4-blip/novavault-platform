@@ -1,0 +1,6 @@
+{
+  "name": "NovaVault",
+  "description": "Telegram Reward Mini App with verified ad postbacks, tasks, referrals, wallet withdrawals, and mobile-first admin panel.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
