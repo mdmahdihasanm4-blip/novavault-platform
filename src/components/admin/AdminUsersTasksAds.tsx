@@ -712,7 +712,7 @@ export function AdminAdsSection({
     void load();
   }, []);
 
-  const postbackTemplate = `${window.location.origin}/api/ads/postback?click_id={click_id}&tx_id={tx_id}&token=YOUR_POSTBACK_SECRET`;
+  const postbackTemplate = `${window.location.origin}/api/ads/postback?ymid={ymid}&reward_event_type={reward_event_type}&event_type={event_type}&token=YOUR_POSTBACK_SECRET`;
 
   const saveProvider = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -765,7 +765,7 @@ export function AdminAdsSection({
             setEditing({
               name: '',
               provider_type: 'monetag',
-              sdk_zone_id: '',
+              sdk_zone_id: '12360811',
               placement_id: '',
               apiKey: '',
               ad_url_template: '',
@@ -834,7 +834,7 @@ export function AdminAdsSection({
           </button>
         </div>
         <p className="text-[11px] text-slate-400">
-          Duplicate <code className="font-mono text-slate-200">tx_id</code> postbacks and mismatched tokens are rejected automatically. When no active provider is configured, users see &ldquo;Advertisements are temporarily unavailable.&rdquo;
+          For Monetag, replace <code className="font-mono text-slate-200">YOUR_POSTBACK_SECRET</code> with the exact secret saved in that provider, then paste the URL into Monetag Postback settings. Only <code className="font-mono text-slate-200">valued</code> events are rewarded; duplicate postbacks are rejected.
         </p>
       </div>
 
@@ -842,7 +842,8 @@ export function AdminAdsSection({
       {providers.length === 0 ? (
         <div className="rounded-2xl border border-white/10 bg-[#10152B] p-6 text-center space-y-1.5">
           <p className="text-sm font-semibold text-white">No ad providers configured</p>
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-slate-400">For Monetag, replace YOUR_POSTBACK_SECRET with the exact secret saved in this provider, then paste the URL into Monetag Postback settings.</p>
+        <p className="text-xs text-slate-400">
             Users currently see &ldquo;Advertisements are temporarily unavailable.&rdquo; Add a real ad network above to enable ad rewards.
           </p>
         </div>
@@ -1024,7 +1025,7 @@ export function AdminAdsSection({
                 type="text"
                 value={editing.sdk_zone_id || ''}
                 onChange={(e) => setEditing({ ...editing, sdk_zone_id: e.target.value })}
-                placeholder="Zone / Block ID"
+                placeholder={(editing.provider_type || 'monetag') === 'monetag' ? 'Main Monetag SDK Zone ID' : 'Zone / Block ID'}
                 className="min-h-[42px] rounded-xl border border-white/10 bg-[#080B18] px-3 text-sm text-white"
               />
             </div>
@@ -1055,10 +1056,10 @@ export function AdminAdsSection({
             />
             <input
               type="url"
-              required
+              required={(editing.provider_type || 'monetag') !== 'monetag'}
               value={editing.ad_url_template || ''}
               onChange={(e) => setEditing({ ...editing, ad_url_template: e.target.value })}
-              placeholder="https://your-ad-network.com/offer?click_id={click_id}&user_id={user_id}"
+              placeholder={(editing.provider_type || 'monetag') === 'monetag' ? 'Not required for Monetag SDK' : 'https://your-ad-network.com/offer?click_id={click_id}&user_id={user_id}'}
               className="min-h-[42px] w-full rounded-xl border border-white/10 bg-[#080B18] px-3 text-sm text-white"
             />
             <input

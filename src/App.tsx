@@ -20,6 +20,7 @@ import { HomeTab } from './components/miniapp/HomeTab.tsx';
 import { PlayTab } from './components/miniapp/PlayTab.tsx';
 import { ReferTab } from './components/miniapp/ReferTab.tsx';
 import { apiFetch } from './lib/api.ts';
+import createAdHandler from 'monetag-tg-sdk';
 import { initTelegramMiniApp, safeOpenExternalUrl } from './lib/telegram.ts';
 import type { BootstrapPayload, MiniTab } from './types/app.ts';
 
@@ -167,15 +168,36 @@ export default function App() {
     if (!userToken) return;
     setAdLoadingSlot(slotNumber);
     try {
-      const res = await apiFetch<{ adUrl: string; sessionId: string }>(
+      const res = await apiFetch<{
+        adUrl: string;
+        sessionId: string;
+        providerType?: string;
+        sdkZoneId?: string;
+      }>(
         '/api/ads/start',
         { method: 'POST', body: JSON.stringify({ providerId, slotNumber }) },
         userToken
       );
-      if (res.adUrl) {
+
+      if ((res.providerType || '').toLowerCase() === 'monetag') {
+        const zoneId = Number(res.sdkZoneId);
+        if (!Number.isSafeInteger(zoneId) || zoneId <= 0) {
+          throw new Error('Monetag main SDK Zone ID is missing. Ask admin to configure it.');
+        }
+        const showAd = createAdHandler(zoneId) as unknown as (options?: {
+          ymid?: string;
+          requestVar?: string;
+        }) => Promise<unknown>;
+        await showAd({ ymid: res.sessionId, requestVar: `ad_slot_${slotNumber}` });
+        showToast(
+          t('msg.ad_session_started', 'Ad finished. Reward will be credited after Monetag confirms a valued event.'),
+          'success'
+        );
+      } else {
+        if (!res.adUrl) throw new Error('Ad provider URL is not configured.');
         safeOpenExternalUrl(res.adUrl);
+        showToast(t('msg.ad_session_started', 'Ad window opened. Reward credits once provider confirms view.'), 'success');
       }
-      showToast(t('msg.ad_session_started', 'Ad window opened. Reward credits once provider confirms view.'), 'success');
       await refreshApp();
     } catch (err) {
       showToast(err instanceof Error ? err.message : t('err.generic', 'Something went wrong.'), 'error');

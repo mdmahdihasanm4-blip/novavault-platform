@@ -755,6 +755,8 @@ app.post(
     const provider = await queryOne<{
       id: number;
       name: string;
+      provider_type: string;
+      sdk_zone_id: string;
       ad_url_template: string;
       reward_points: number;
       daily_limit: number;
@@ -791,38 +793,50 @@ app.post(
       return;
     }
 
-    // Return existing pending session for same slot if already opened today
-    const existing = await queryOne<{ id: string; status: string }>(
-      'SELECT id, status FROM ad_sessions WHERE user_id = $1 AND provider_id = $2 AND slot_number = $3 AND created_at >= $4',
+    // A Monetag ymid must be unique for every ad-show attempt.
+    // Do not reuse an earlier pending session when the user retries this slot.
+    const completedSlot = await queryOne<{ id: string }>(
+      `SELECT id FROM ad_sessions
+       WHERE user_id = $1 AND provider_id = $2 AND slot_number = $3
+         AND status = 'verified' AND created_at >= $4
+       LIMIT 1`,
+      [userId, provider.id, slot, startIso]
+    );
+    if (completedSlot) {
+      res.status(409).json({ error: 'This daily ad slot is already completed' });
+      return;
+    }
+
+    // Supersede any earlier unfinished attempt for this slot so its late postback
+    // cannot pay out after a newer attempt has started.
+    await execute(
+      `UPDATE ad_sessions SET status = 'superseded'
+       WHERE user_id = $1 AND provider_id = $2 AND slot_number = $3
+         AND status = 'initiated' AND created_at >= $4`,
       [userId, provider.id, slot, startIso]
     );
 
-    let sessionId: string;
-    if (existing) {
-      if (existing.status === 'verified') {
-        res.status(409).json({ error: 'This daily ad slot is already completed' });
-        return;
-      }
-      sessionId = existing.id;
-    } else {
-      sessionId = `ad_${crypto.randomBytes(10).toString('hex')}`;
-      await execute(
-        `INSERT INTO ad_sessions (id, user_id, provider_id, slot_number, status, reward_points, ip_address, created_at)
-         VALUES ($1, $2, $3, $4, 'initiated', $5, $6, $7)`,
-        [sessionId, userId, provider.id, slot, provider.reward_points, req.ip || '', new Date().toISOString()]
-      );
-    }
-
-    const adUrl = sanitizeExternalUrl(
-      provider.ad_url_template
-        .replace('{click_id}', encodeURIComponent(sessionId))
-        .replace('{user_id}', encodeURIComponent(String(userId)))
+    const sessionId = `ad_${crypto.randomBytes(16).toString('hex')}`;
+    await execute(
+      `INSERT INTO ad_sessions (id, user_id, provider_id, slot_number, status, reward_points, ip_address, created_at)
+       VALUES ($1, $2, $3, $4, 'initiated', $5, $6, $7)`,
+      [sessionId, userId, provider.id, slot, provider.reward_points, req.ip || '', new Date().toISOString()]
     );
+
+    const adUrl = provider.ad_url_template
+      ? sanitizeExternalUrl(
+          provider.ad_url_template
+            .replace('{click_id}', encodeURIComponent(sessionId))
+            .replace('{user_id}', encodeURIComponent(String(userId)))
+        )
+      : '';
 
     res.json({
       ok: true,
       sessionId,
       adUrl,
+      providerType: provider.provider_type,
+      sdkZoneId: provider.sdk_zone_id,
       status: 'initiated',
     });
   })
@@ -858,7 +872,10 @@ async function recordAdPostback(params: {
 }
 
 const handleAdPostback = asyncHandler(async (req: Request, res: Response) => {
-  const clickId = String(req.query.click_id || req.query.subid || req.body?.click_id || req.body?.subid || '').trim();
+  const clickId = String(
+    req.query.ymid || req.query.click_id || req.query.subid ||
+    req.body?.ymid || req.body?.click_id || req.body?.subid || ''
+  ).trim();
   const token = String(
     req.query.token ||
       req.query.verify_token ||
@@ -868,11 +885,15 @@ const handleAdPostback = asyncHandler(async (req: Request, res: Response) => {
       req.body?.secret ||
       ''
   ).trim();
+  const rewardEventType = String(
+    req.query.reward_event_type || req.body?.reward_event_type || ''
+  ).trim().toLowerCase();
+  const eventType = String(req.query.event_type || req.body?.event_type || '').trim().toLowerCase();
   const txId = String(
-    req.query.tx_id || req.query.transaction_id || req.query.event_id || req.body?.tx_id || req.body?.transaction_id || ''
-  )
-    .trim()
-    .slice(0, 120);
+    req.query.ymid || req.body?.ymid ||
+    req.query.tx_id || req.query.transaction_id || req.query.event_id ||
+    req.body?.tx_id || req.body?.transaction_id || ''
+  ).trim().slice(0, 120);
   const rawReward = req.query.reward ?? req.body?.reward;
   const rawRewardStr = rawReward !== undefined && rawReward !== null ? String(rawReward) : '';
   const ip = req.ip || '';
@@ -916,6 +937,7 @@ const handleAdPostback = asyncHandler(async (req: Request, res: Response) => {
     id: number;
     name: string;
     postback_secret_hash: string;
+    provider_type: string;
     daily_limit: number;
     reset_hour_utc: number;
   }>('SELECT * FROM ad_providers WHERE id = $1', [session.provider_id]);
@@ -932,6 +954,24 @@ const handleAdPostback = asyncHandler(async (req: Request, res: Response) => {
     });
     res.status(403).json({ error: 'Invalid postback signature token' });
     return;
+  }
+
+  // Monetag postbacks may report both valued and non-valued events.
+  // Only a Monetag-confirmed valued event can ever credit a user.
+  if (String(provider.provider_type || '').toLowerCase() === 'monetag') {
+    if (rewardEventType !== 'valued') {
+      await recordAdPostback({
+        providerId: provider.id,
+        sessionId: clickId,
+        txId,
+        status: 'non_valued',
+        errorMessage: `Monetag event not rewardable (${rewardEventType || 'missing'}${eventType ? `/${eventType}` : ''})`,
+        rawReward: rewardEventType,
+        ip,
+      });
+      res.json({ ok: true, rewarded: false, reason: 'non_valued' });
+      return;
+    }
   }
 
   if (rawReward !== undefined && rawReward !== '') {
@@ -2045,9 +2085,11 @@ app.post(
       return;
     }
 
-    const cleanAdUrl = sanitizeExternalUrl(String(adUrlTemplate || ''));
-    if (!cleanAdUrl) {
-      res.status(400).json({ error: 'A valid HTTP/HTTPS Ad URL template is required' });
+    const providerKind = String(providerType || 'monetag').trim().toLowerCase();
+    const rawAdUrl = String(adUrlTemplate || '').trim();
+    const cleanAdUrl = rawAdUrl ? sanitizeExternalUrl(rawAdUrl) : '';
+    if ((rawAdUrl && !cleanAdUrl) || (providerKind !== 'monetag' && !cleanAdUrl)) {
+      res.status(400).json({ error: 'A valid HTTP/HTTPS Ad URL template is required for this provider' });
       return;
     }
 
@@ -2107,7 +2149,17 @@ app.put(
       return;
     }
 
-    const cleanAdUrl = sanitizeExternalUrl(String(adUrlTemplate || '')) || existing.ad_url_template;
+    const providerKind = String(providerType || 'monetag').trim().toLowerCase();
+    const rawAdUrl = String(adUrlTemplate || '').trim();
+    const cleanAdUrl = rawAdUrl
+      ? sanitizeExternalUrl(rawAdUrl)
+      : providerKind === 'monetag'
+        ? ''
+        : existing.ad_url_template;
+    if ((rawAdUrl && !cleanAdUrl) || (providerKind !== 'monetag' && !cleanAdUrl)) {
+      res.status(400).json({ error: 'A valid HTTP/HTTPS Ad URL template is required for this provider' });
+      return;
+    }
 
     await execute(
       `UPDATE ad_providers SET name = $1, provider_type = $2, sdk_zone_id = $3, placement_id = $4, api_key = $5, ad_url_template = $6, postback_secret_hash = $7, reward_points = $8, payout_per_conversion_bdt = $9, daily_limit = $10, reset_hour_utc = $11, is_active = $12
